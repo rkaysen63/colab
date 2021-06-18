@@ -1,0 +1,92 @@
+#16.9.1_pyspark_ETL.ipynb
+# https://colab.research.google.com/drive/1zWsf_ZVOhCFzhHddDhy11G8nnN3jgr5p?authuser=1#scrollTo=1DTe62UM8v71
+
+import os
+# Find the latest version of spark 3.0 from http://www-us.apache.org/dist/spark/ and enter as spark version
+spark_version='spark-3.1.2'
+os.environ['SPARK_VERSION']=spark_version
+
+#Install Spark and Java
+!apt-get update
+!apt-get install openjdk-11-jdk-headless -qq > /dev/null
+!wget -q http://www-us.apache.org/dist/spark/$SPARK_VERSION/$SPARK_VERSION-bin-hadoop2.7.tgz
+!tar xf $SPARK_VERSION-bin-hadoop2.7.tgz
+!pip install -q findspark
+
+# Set Environment Variables
+import os
+os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-amd64"
+os.environ["SPARK_HOME"] =  f"/content/{spark_version}-bin-hadoop2.7"
+
+# Start a SparkSession
+import findspark
+findspark.init()
+
+# Download a PostGres driver that will allow spark to interact with Postgres.
+!wget https://jdbc.postgresql.org/download/postgresql-42.2.16.jar
+
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.appName("CloudETL").config("spark.driver.extraClassPath","/content/postgresql-42.2.16.jar").getOrCreate()
+
+# Read in data from S3 Buckets
+from pyspark import SparkFiles
+url ="https://rkaysen63-bucket.s3.us-east-2.amazonaws.com/user_data.csv"
+spark.sparkContext.addFile(url)
+user_data_df = spark.read.csv(SparkFiles.get("user_data.csv"), sep=",", header=True, inferSchema=True)
+
+# Show DataFrame
+user_data_df.show()
+
+# Read in data from S3 Buckets
+url ="https://rkaysen63-bucket.s3.us-east-2.amazonaws.com/user_payment.csv"
+spark.sparkContext.addFile(url)
+user_payment_df = spark.read.csv(SparkFiles.get("user_payment.csv"), sep=",", header=True, inferSchema=True)
+
+# Show DataFrame
+user_payment_df.show()
+
+# Join the two DataFrames
+joined_df = user_data_df.join(user_payment_df, on="username", how="inner")
+joined_df.show(truncate=False)
+
+# Drop null values
+dropna_df = joined_df.dropna()
+dropna_df.show(5, truncate=False)
+
+# Load in a sql function to use columns
+from pyspark.sql.functions import col
+
+# Filter for only columns with active users
+cleaned_df = dropna_df.filter(col("active_user") == True)
+cleaned_df.show(5, truncate=False)
+
+# Create user dataframe to match active_user table.
+clean_user_df = cleaned_df.select(["id", "first_name", "last_name", "username"])
+clean_user_df.show()
+
+# Create user dataframe to match billing_info table.
+clean_billing_df = cleaned_df.select(["billing_id", "street_address", "state", "username"])
+clean_billing_df.show()
+
+# Create user dataframe to match payment_info table.
+clean_payment_df = cleaned_df.select(["billing_id", "cc_encrypted"])
+clean_payment_df.show(truncate=False)
+
+# Store environmental variable
+from getpass import getpass
+password = getpass('Enter database password')
+# Configure settings for RDS
+mode = "append"
+jdbc_url="jdbc:postgresql://dataviz.cy9jo47yctxb.us-east-2.rds.amazonaws.com:5432/my_data_class_db"
+config = {"user":"postgres",
+          "password": password,
+          "driver":"org.postgresql.Driver"}
+
+# Write DataFrame to active_user table in RDS
+clean_user_df.write.jdbc(url=jdbc_url, table='active_user', mode=mode, properties=config)
+
+# Write dataframe to billing_info table in RDS
+clean_billing_df.write.jdbc(url=jdbc_url, table='billing_info', mode=mode, properties=config)
+
+# Write dataframe to payment_info table in RDS
+clean_payment_df.write.jdbc(url=jdbc_url, table='payment_info', mode=mode, properties=config)
